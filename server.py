@@ -411,7 +411,9 @@ def render():
         folder = new_run()
         piece = render_map(source,folder)
         if not piece.get('imagen'):
+            app.logger.warning('Blender: %s %s',piece.get('estado'),piece.get('detalle',''))
             abort(502,'Blender no produjo un render. Comprueba que el servidor pueda ejecutarlo.')
+        legend = {key: maps[-1][key] for key in ('key','legend','scale_note') if key in maps[-1]} if maps else {}
         return jsonify(maps=[{'title':'Lámina cartográfica en Blender',
-                       'path':asset(folder,Path(piece['imagen']).name)}])
+                       'path':asset(folder,Path(piece['imagen']).name),**legend}])
     return run_job(execute)
