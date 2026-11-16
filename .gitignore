@@ -1,5 +1,6 @@
 .env
 .env.*
 secrets/
+earth-engine.json
 __pycache__/
 *.pyc

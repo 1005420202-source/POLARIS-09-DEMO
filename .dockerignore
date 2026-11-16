@@ -2,4 +2,5 @@
 .env
 .env.*
 secrets
+earth-engine.json
 __pycache__

@@ -224,7 +224,9 @@ def earth_engine():
     if not project:
         abort(503, 'Falta configurar el proyecto de Earth Engine en el servidor.')
     import ee
-    ee.Initialize(project=project)
+    import google.auth
+    credentials, _ = google.auth.default(scopes=ee.oauth.SCOPES)
+    ee.Initialize(credentials=credentials, project=project)
     return ee
 
 
