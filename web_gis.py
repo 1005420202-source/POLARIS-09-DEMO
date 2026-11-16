@@ -21,6 +21,51 @@ PRODUCTS = {
 }
 
 
+def paint_sample(pixels, vis, path, discrete):
+    import numpy as np
+    from PIL import Image, ImageColor
+
+    values = np.asarray(pixels, dtype=np.float32)
+    if values.ndim != 2 or not values.size:
+        raise ValueError('La consulta no devolvió una imagen del área.')
+    valid = np.isfinite(values) & (values != -9999)
+    palette = np.array([ImageColor.getrgb('#'+color) for color in vis['palette']])
+    colors = np.clip((np.where(valid, values, vis['min'])-vis['min']) /
+                     (vis['max']-vis['min']), 0, 1) * (len(palette)-1)
+    if discrete:
+        rgb = palette[np.rint(colors).astype(int)]
+    else:
+        steps = np.arange(len(palette))
+        rgb = np.stack([np.interp(colors, steps, palette[:, channel]) for channel in range(3)], axis=-1)
+    rgba = np.dstack((rgb, valid * 255)).astype('uint8')
+    image = Image.fromarray(rgba)
+    factor = max(1, 560 // max(image.size))
+    image.resize((image.width*factor,image.height*factor),Image.Resampling.NEAREST).save(path)
+
+
+def make_preview(ee, image, region, geometry, vis, path, scale, discrete):
+    clipped = image.clip(region)
+    try:
+        url = clipped.getThumbURL({'region':region, 'dimensions':760, 'format':'png', **vis})
+    except ee.EEException as error:
+        if 'earthengine.thumbnails.create' not in str(error):
+            raise
+    else:
+        with urllib.request.urlopen(url, timeout=45) as response:
+            path.write_bytes(response.read(8 * 1024 * 1024))
+        return ''
+
+    from shapely.geometry import shape
+    west, south, east, north = shape(geometry).bounds
+    preview_scale = max(scale, round(max(east-west,north-south)*111320/200))
+    property_name = 'render_value'
+    sample = clipped.rename(property_name).toFloat().reproject(crs='EPSG:4326',scale=preview_scale)
+    pixels = sample.sampleRectangle(region=region.bounds(1), properties=[],
+                                    defaultValue=-9999).get(property_name).getInfo()
+    paint_sample(pixels, vis, path, discrete)
+    return f' · muestreo de vista previa ~{preview_scale} m'
+
+
 def analyze(ee, geometry, start, end, key, folder):
     label, dataset, band, method, scale = PRODUCTS[key]
     region = ee.Geometry(geometry)
@@ -79,10 +124,7 @@ def analyze(ee, geometry, start, end, key, folder):
                   'smap_soil_moisture':'mean_surface_soil_moisture_m3_m3'}.get(key,'mean_value')
         result = {metric:stats}
     path = folder / (key + '.png')
-    url = image.clip(region).getThumbURL({'region':region, 'dimensions':760, 'format':'png', **vis})
-    with urllib.request.urlopen(url, timeout=45) as response:
-        png = response.read(8 * 1024 * 1024)
-    path.write_bytes(png)
+    preview_note = make_preview(ee,image,region,geometry,vis,path,scale,method=='classes')
     artifact = {'key':key,'title':label,'path':str(path),'legend':legend,
-                'scale_note':f'{dataset} · {scale} m'}
+                'scale_note':f'{dataset} · {scale} m{preview_note}'}
     return {key:result}, [artifact], region.area(1).divide(1e6).getInfo()
