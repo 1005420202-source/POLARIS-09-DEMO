@@ -41,7 +41,7 @@ $('geo').onchange=async event=>{
         }else{
             geometry=JSON.parse(await file.text());
         }
-        const layer=L.geoJSON(geometry,{filter:f=>['Polygon','MultiPolygon'].includes(f.geometry?.type),
+        const layer=L.geoJSON(geometry,{filter:f=>['Polygon','MultiPolygon'].includes(f.geometry?.type || f.type),
             style:{color:'#1499cf',weight:3,fillColor:'#89cbe6',fillOpacity:.27}});
         if(!layer.getLayers().length)throw Error('No contiene polígonos.');
         clearAOI();
