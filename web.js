@@ -125,15 +125,17 @@ bind('run-uav','uav', () => {
     if (!file) throw new Error('Selecciona una imagen UAV.');
     const form = new FormData();
     form.append('image', file);
+    if (aoiLayer) form.append('aoi',JSON.stringify(selectedArea()));
     return form;
 });
 bind('run-ai','assistant', () => {
     const form = new FormData();
     form.append('question',$('question').value);
+    if (aoiLayer) form.append('aoi',JSON.stringify(selectedArea()));
     if ($('photo').files[0]) form.append('image',$('photo').files[0]);
     return form;
 });
-bind('run-report','report', () => ({}));
+bind('run-report','report', () => ({aoi:selectedArea()}));
 bind('run-blender','blender', () => ({aoi:selectedArea()}));
 
 api('status').then(config => {

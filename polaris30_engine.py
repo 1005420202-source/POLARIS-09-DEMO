@@ -46,7 +46,8 @@ def _aoi_mask(aoi, width=420):
     if not mask.any():raise ValueError('El polígono no contiene píxeles a la resolución elegida.')
     return mask,transform
 
-def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hours=24,mode='ambos',uav_paths=None):
+def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hours=24,mode='ambos',uav_paths=None,
+             slope_provider=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -65,10 +66,23 @@ def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hou
     theta0=min(theta_s,max(.05,float(initial)))
     rain=max(0,float(rain_mm)); steps=max(2,min(72,int(hours)))
     dz=.1; nz=int(round(float(depth_m)/dz))
-    # Sin mediciones: variabilidad espacial ilustrativa, no inferencia hidrogeológica.
-    yy,xx=np.mgrid[0:h,0:w]
-    nx=xx/max(1,w-1); ny=yy/max(1,h-1)
-    terrain_proxy=np.clip(.5+.22*np.sin(nx*6)*np.cos(ny*5)+.12*(1-ny),0,1)
+    terrain_source = {'fuente':'Sin pendiente observada · escenario uniforme'}
+    terrain_proxy = np.full((h,w),.5,dtype='float32')
+    slope_proxy = terrain_proxy.copy()
+    rain_fraction = 1.
+    if slope_provider is not None:
+        slope, slope_resolution = slope_provider(mask,transform)
+        if not np.isfinite(slope[mask]).all():
+            raise ValueError('NASADEM no cubre toda el área. Ajusta el polígono para simular con terreno real.')
+        normalized_slope = np.clip(np.where(mask,slope,0)/45,0,1)
+        terrain_proxy = 1-normalized_slope
+        slope_proxy = terrain_proxy.copy()
+        # Partición conceptual: las laderas más fuertes retienen menos lluvia local.
+        rain_fraction = 1-.65*normalized_slope
+        terrain_source = {'fuente':'Pendiente NASADEM HGT v001',
+                          'resolucion_muestreo_m':slope_resolution,
+                          'pendiente_media_grados':round(float(slope[mask].mean()),2),
+                          'metodo':'Fracción de lluvia retenida estimada a partir de la pendiente'}
     uav_used=[]
     # Sólo se incorpora señal visual si el UAV posee georreferencia y solapa el AOI.
     for upath in (uav_paths or [])[:5]:
@@ -95,7 +109,7 @@ def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hou
     history=[]; snapshots=[]; dt_hours=float(hours)/steps
     for t in range(steps):
         input_mm=rain/steps
-        infiltration=np.minimum(input_mm,ksat*dt_hours*(.65+.7*terrain_proxy))
+        infiltration=np.minimum(input_mm*rain_fraction,ksat*dt_hours*(.65+.7*terrain_proxy))
         remaining=infiltration.astype('float32')
         for z in range(nz):
             capacity=np.maximum(0,(theta_s-theta[z])*dz*1000)
@@ -105,14 +119,14 @@ def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hou
             # drenaje gravitacional conceptual, acotado y conservativo
             if z<nz-1:
                 excess=np.maximum(0,(theta[z]-theta_fc)*dz*1000)
-                drain=np.minimum(excess,ksat*dt_hours*.25)
+                relative_excess=np.clip((theta[z]-theta_fc)/(theta_s-theta_fc),0,1)
+                drain=np.minimum(excess,ksat*dt_hours*.25*relative_excess**2)
                 theta[z]-=drain/(dz*1000)
                 remaining+=drain
         history.append(float(np.mean(theta[0][mask])))
         if t%max(1,steps//12)==0:snapshots.append((t,theta[:,mask].mean(axis=1).copy()))
     # Aptitud preliminar basada sólo en proxies disponibles, no aptitud validada.
     moist=np.clip((theta[0]-theta0)/max(.01,theta_s-theta0),0,1)
-    slope_proxy=np.clip(1-np.abs(np.gradient(terrain_proxy)[0])*6,0,1)
     cover_proxy=np.clip(terrain_proxy,0,1)
     criteria={}
     for key,(label,weights) in USES.items():
@@ -159,14 +173,17 @@ def simulate(aoi,output_dir,soil='franco',rain_mm=30.,initial=.22,depth_m=2.,hou
       'theta_inicial':theta0,'theta_s':theta_s,'conductividad_saturada_mm_h':ksat,
       'area_aoi_ha':round(area_ha,3),'crs':'EPSG:32718','pixel_area_m2':round(abs(transform.a*transform.e),2),
       'humedad_superficial_final_media':round(float(np.mean(theta[0][mask])),4),
-      'humedad_2m_final_media':round(float(np.mean(theta[-1][mask])),4),
+      'humedad_superficial_final_minima':round(float(np.min(theta[0][mask])),4),
+      'humedad_superficial_final_maxima':round(float(np.max(theta[0][mask])),4),
+      'humedad_2m_final_media':round(float(np.mean(theta[-1][mask])),4),'terreno':terrain_source,
       'aptitudes':criteria,'uav_georreferenciados_usados':uav_used,
       'cultivos':{'modo':'recomendación preliminar','candidatos':['papa','maíz','quinua','alfalfa'],
        'advertencia':'No se recomienda un cultivo específico sin pH, textura real, clima, altitud, disponibilidad de agua y análisis de suelo.'},
       'malezas':{'catalogo_regional_orientativo':WEEDS_ANDEAN,'especies_identificadas':[],
         'estado':'Sin modelo botánico entrenado ni fotografías etiquetadas: no se identifican especies automáticamente.'},
       'archivos':{'mapa_superficial':top_png,'mapa_2m':deep_png,'animacion':str(gif),'grafica':str(chart)},
-      'limitaciones':['Parámetros hipotéticos; sin calibración de campo','Proxies espaciales no equivalen a relieve ni humedad real',
+      'limitaciones':['Lluvia, suelo y humedad inicial ingresados para el escenario; sin calibración de campo',
+        'La pendiente orienta el modelo conceptual. Las salidas no son humedad medida.',
         'La simulación vertical es conceptual y no predice nivel freático','La aptitud para infraestructura requiere estudios geotécnicos y restricciones normativas']}
     (out/'resultados_simulacion.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     with (out/'aptitudes.csv').open('w',encoding='utf-8-sig',newline='') as f:

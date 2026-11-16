@@ -85,9 +85,72 @@ def terrain_sample(ee, geometry):
     return values, width, height, scale
 
 
+def slope_for_simulation(ee, mask, grid):
+    import math
+    import numpy as np
+    from rasterio.transform import from_origin
+    from rasterio.warp import reproject, Resampling
+
+    rows, cols = mask.shape
+    west, north = grid.c, grid.f
+    width, height = cols*grid.a, -rows*grid.e
+    scale = max(30, math.ceil(max(width,height)/100))
+    ncols, nrows = math.ceil(width/scale), math.ceil(height/scale)
+    crs = 'EPSG:32718'
+    source = from_origin(west,north,scale,scale)
+    inset = scale/100
+    bounds = ee.Geometry.Rectangle([west+inset,north-nrows*scale+inset,
+                                   west+ncols*scale-inset,north-inset],crs,False)
+    dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
+    slope = ee.Terrain.slope(dem).toFloat().reproject(crs=crs,crsTransform=list(source)[:6])
+    samples = slope.sampleRectangle(region=bounds,properties=[],defaultValue=-9999).get('slope').getInfo()
+    values = np.asarray(samples,dtype='float32')
+    if values.shape != (nrows,ncols):
+        raise ValueError('La rejilla de pendientes no coincide con el área solicitada.')
+    target = np.full(mask.shape,np.nan,dtype='float32')
+    reproject(values,target,src_transform=source,dst_transform=grid,src_crs=crs,dst_crs=crs,
+              src_nodata=-9999,dst_nodata=np.nan,resampling=Resampling.bilinear)
+    return target, scale
+
+
+def regional_moisture(ee, image, region, geometry, projection, key, folder):
+    from shapely.geometry import shape
+
+    native = image.toFloat().reproject(projection)
+    reducer = ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True)
+    grid = {'crs':projection,'maxPixels':1_000_000}
+    stats = native.reduceRegion(reducer=reducer,geometry=region,**grid).getInfo()
+    location = None
+    method = 'Promedio espacial ponderado por el área del polígono dentro de la rejilla original'
+    if stats.get('value_mean') is None:
+        point = shape(geometry).representative_point()
+        location = [point.x,point.y]
+        stats = native.reduceRegion(reducer=reducer, geometry=ee.Geometry.Point(location),**grid).getInfo()
+        method = 'Celda que contiene un punto interior del polígono; el área no resolvió un promedio zonal'
+    if stats.get('value_mean') is None:
+        raise ValueError('El producto regional no tiene humedad válida para el área y periodo seleccionados.')
+    nominal = round(projection.nominalScale().getInfo())
+    name = ('mean_surface_soil_moisture_m3_m3' if key == 'smap_soil_moisture'
+            else 'mean_soil_moisture_0_10cm_kg_m2')
+    data = {name:stats['value_mean'],'minimo_regional':stats.get('value_min'),
+            'maximo_regional':stats.get('value_max'),'resolucion_nominal_m':nominal,'metodo_espacial':method,
+            'alcance':'Estimación regional. Dos áreas dentro de la misma celda pueden compartir el valor.'}
+    if location is not None:
+        data['punto_interior_wgs84_lon_lat'] = location
+    path = folder / (key + '.png')
+    legend = MAP_LEGENDS[key]
+    pixels = native.sampleRectangle(region=region.bounds(1),properties=[],defaultValue=-9999).get('value').getInfo()
+    paint_sample(pixels,legend,path,False)
+    title,dataset,*_ = PRODUCTS[key]
+    maps = [{'key':key,'title':title,'path':str(path),'legend':legend,
+             'scale_note':f'{dataset} · rejilla ~{nominal/1000:g} km · celdas alrededor del AOI'}]
+    return {key:data}, maps, region.area(1).divide(1e6).getInfo()
+
+
 def analyze(ee, geometry, start, end, key, folder):
     label, dataset, band, method, scale = PRODUCTS[key]
     region = ee.Geometry(geometry)
+    projection = None
     if method in ('image', 'slope'):
         dem = ee.Image(dataset).select(band)
         image = ee.Terrain.slope(dem) if method == 'slope' else dem
@@ -115,12 +178,16 @@ def analyze(ee, geometry, start, end, key, folder):
             image = collection.map(index).median()
         else:
             collection = collection.select(band)
+            if key in ('smap_soil_moisture','gldas_soil_moisture'):
+                projection = collection.first().projection()
             image = collection.sum() if method in ('sum','half_hour_sum') else collection.mean()
             if method == 'half_hour_sum':
                 image = image.multiply(.5)
             if method == 'scaled_mean':
                 image = image.multiply(.0001)
     image = image.rename('value')
+    if projection is not None:
+        return regional_moisture(ee,image,region,geometry,projection,key,folder)
     stats = image.reduceRegion(
         reducer=ee.Reducer.frequencyHistogram() if method == 'classes' else ee.Reducer.mean(),
         geometry=region, scale=scale, maxPixels=30_000_000, tileScale=4,

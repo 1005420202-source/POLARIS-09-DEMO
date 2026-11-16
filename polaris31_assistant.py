@@ -47,7 +47,7 @@ def decision_context(results, drone=None):
     simulation = results.get('simulacion_aoi')
     if simulation:
         fields = ('modelo', 'lluvia_escenario_mm', 'suelo_hipotetico', 'theta_inicial',
-                  'humedad_superficial_final_media', 'humedad_2m_final_media', 'aptitudes')
+            'humedad_superficial_final_media', 'humedad_2m_final_media', 'terreno', 'aptitudes')
         context['simulacion_AOI'] = {k: simulation[k] for k in fields if k in simulation}
     if drone:
         fields = ('input_count', 'summary', 'total_valid_pixels', 'interpretation_limit')

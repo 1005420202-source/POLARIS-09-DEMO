@@ -89,9 +89,25 @@ def results_for_geometry(geometry):
     state = read_results()
     signature = json.loads(json.dumps(geometry))
     if state.get('geometry') != signature:
-        for key in ('results','gis_key','period','artifacts','aoi','selected_processes','simulacion_aoi','ai_history'):
+        for key in ('results','gis_key','period','artifacts','aoi','selected_processes','simulacion_aoi','ai_history','drone_moisture'):
             state.pop(key, None)
         state['geometry'] = signature
+        from pyproj import Geod
+        from shapely.geometry import shape
+        from shapely.geometry.polygon import orient
+        spatial = shape(geometry)
+        parts = list(spatial.geoms) if spatial.geom_type == 'MultiPolygon' else [spatial]
+        geod = Geod(ellps='WGS84')
+        area = sum(abs(geod.geometry_area_perimeter(orient(part))[0]) for part in parts)
+        state['aoi'] = {'area_km2':round(area/1e6,6),'sources':['Polígono seleccionado en POLARIS09 (WGS84)']}
+    return state
+
+
+def results_in_selected_area(value):
+    geometry = geo(value)
+    state = read_results()
+    if state.get('geometry') != json.loads(json.dumps(geometry)):
+        raise ValueError('Ejecuta primero un análisis para el polígono seleccionado.')
     return state
 
 
@@ -253,8 +269,9 @@ def gis():
         run_key = json.loads(json.dumps(run_key))
         if state.get('gis_key') != run_key:
             state.update(gis_key=run_key, results={}, artifacts={'maps':[]}, selected_processes=[])
-        state.update(period={'start': str(start), 'end': str(end)}, aoi={'area_km2':area},
+        state.update(period={'start': str(start), 'end': str(end)},
                      project_id=os.environ['POLARIS_GEE_PROJECT'])
+        state.setdefault('aoi',{})['area_km2'] = area
         state['results'].update(result)
         files = state['artifacts']['maps']
         files[:] = [item for item in files if item['key'] not in {m['key'] for m in maps}]
@@ -268,6 +285,7 @@ def gis():
 @app.post('/api/simulation')
 def simulation():
     from polaris30_engine import simulate
+    from web_gis import slope_for_simulation
     data = payload()
     geometry = geo(data.get('aoi'))
     soil = data.get('soil')
@@ -280,13 +298,19 @@ def simulation():
 
     def execute():
         folder = new_run()
-        result = simulate(geometry,folder,soil=soil,rain_mm=rain,initial=initial)
+        slope_provider = None
+        if os.environ.get('POLARIS_GEE_PROJECT'):
+            ee = earth_engine()
+            slope_provider = lambda mask, grid: slope_for_simulation(ee,mask,grid)
+        result = simulate(geometry,folder,soil=soil,rain_mm=rain,initial=initial,
+                          slope_provider=slope_provider)
         state = results_for_geometry(geometry)
         state['simulacion_aoi'] = result
         state.setdefault('aoi', {})['area_km2'] = result['area_aoi_ha'] / 100
         save_results(state)
         return jsonify(result={k:result[k] for k in ('area_aoi_ha','modelo',
-                        'humedad_superficial_final_media','aptitudes')},
+                        'humedad_superficial_final_media','humedad_superficial_final_minima',
+                        'humedad_superficial_final_maxima','terreno','aptitudes')},
                        maps=[{'title':'Humedad superficial simulada', 'path':asset(folder,Path(result['archivos']['mapa_superficial']).name)}])
     return run_job(execute)
 
@@ -297,17 +321,20 @@ def uav():
     upload = request.files.get('image')
     if not upload or Path(upload.filename or '').suffix.lower() not in ('.png','.jpg','.jpeg','.tif','.tiff'):
         raise ValueError('Sube una imagen JPG, PNG o TIFF de hasta 18 MB.')
+    selected = request.form.get('aoi')
+    geometry = geo(json.loads(selected)) if selected else None
 
     def execute():
         folder = new_run()
         with TemporaryDirectory() as tmp:
             raw = Path(tmp) / ('uav' + Path(upload.filename).suffix.lower())
             upload.save(raw)
-            result, preview = classify(raw, folder)
-        state = read_results()
-        state['drone_moisture'] = result
-        save_results(state)
-        return jsonify(result=result['summary'], maps=[{'title':'Humedad aparente UAV',
+            result, preview = classify(raw, folder, geometry)
+        if geometry and result['origen'].startswith('GeoTIFF'):
+            state = results_for_geometry(geometry)
+            state['drone_moisture'] = result
+            save_results(state)
+        return jsonify(result={'origen':result['origen'],'clases':result['summary']}, maps=[{'title':'Humedad aparente UAV',
                        'path':asset(folder,preview.name)}])
     return run_job(execute)
 
@@ -363,12 +390,15 @@ def assistant():
     if len(question)>1500:
         raise ValueError('La consulta admite hasta 1500 caracteres.')
     photo = request.files.get('image')
+    selected = request.form.get('aoi')
     if photo and Path(photo.filename or '').suffix.lower() not in ('.png','.jpg','.jpeg','.webp'):
         raise ValueError('Para la consulta visual usa JPG, PNG o WEBP.')
 
     def execute():
-        state = read_results()
+        state = results_for_geometry(geo(json.loads(selected))) if selected else {}
         context = decision_context(state, state.get('drone_moisture'))
+        if photo:
+            context['foto']='Fotografía aportada por el usuario, con ubicación sin verificar'
         mode = 'online' if os.environ.get('OPENAI_API_KEY') else 'local'
         if os.environ.get('OPENAI_API_KEY') or os.environ.get('POLARIS_OLLAMA_URL'):
             with TemporaryDirectory() as tmp:
@@ -380,7 +410,8 @@ def assistant():
         else:
             answer = {'provider':'Guía local por reglas','answer':decision_guide(context)}
         state['ai_history'] = [{'pregunta':question,**answer}]
-        save_results(state)
+        if selected:
+            save_results(state)
         return jsonify(answer)
     return run_job(execute)
 
@@ -388,10 +419,11 @@ def assistant():
 @app.post('/api/report')
 def report():
     from polaris31_report import generate_brief_report
+    data = payload()
     def execute():
-        state = read_results()
-        if not state:
-            raise ValueError('Ejecuta primero un análisis o una consulta.')
+        state = results_in_selected_area(data.get('aoi'))
+        if not any(state.get(key) for key in ('results','simulacion_aoi','drone_moisture','ai_history')):
+            raise ValueError('Ejecuta primero un análisis o una consulta del área.')
         folder = new_run()
         file = generate_brief_report(state, folder, include_blender=False)
         return jsonify(path=asset(folder,file.name))

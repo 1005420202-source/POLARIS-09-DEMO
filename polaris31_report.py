@@ -174,6 +174,11 @@ def generate_brief_report(data, folder, include_blender=True):
     else:para('No se registraron consultas del asistente para este informe.')
     page('6. Simulación y aptitud territorial','Simulación conceptual desde la superficie hasta 2 m. Parámetros de suelo hipotéticos.')
     if sim:
+        terrain = sim.get('terreno',{})
+        table([['Humedad superficial simulada (m³/m³)','Pendiente usada'],
+               [sim.get('humedad_superficial_final_media'),terrain.get('fuente','Sin información')]])
+        if terrain.get('pendiente_media_grados') is not None:
+            para(f"Pendiente media del polígono: {terrain['pendiente_media_grados']}° · Muestreo: {terrain['resolucion_muestreo_m']} m.")
         table([['Uso propuesto','Puntaje indicativo','Área alta (ha)']]+[[v.get('nombre'),v.get('puntaje_medio_indicativo'),v.get('area_alta_ha')] for v in sim.get('aptitudes',{}).values()])
         caption='Leyenda de simulación · La barra indica humedad volumétrica superficial simulada (m³/m³).'
         if picture(sim.get('archivos',{}).get('mapa_superficial'),caption,8):
