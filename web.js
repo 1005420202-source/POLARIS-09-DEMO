@@ -65,6 +65,18 @@ function show(data) {
         link.textContent = 'Descargar informe PDF';
         $('maps').append(link);
     }
+    if (data.downloads?.length) {
+        const downloads = document.createElement('div');
+        downloads.className = 'maptools';
+        for (const file of data.downloads) {
+            const link = document.createElement('a');
+            link.href = file.path;
+            link.download = '';
+            link.textContent = file.label;
+            downloads.append(link);
+        }
+        $('maps').append(downloads);
+    }
     $('values').textContent = data.answer ? data.provider + '\n\n' + data.answer
         : (data.result ? JSON.stringify(data.result, null, 2) : '');
     $('values').hidden = !$('values').textContent;
@@ -122,7 +134,7 @@ bind('run-ai','assistant', () => {
     return form;
 });
 bind('run-report','report', () => ({}));
-bind('run-blender','blender', () => ({}));
+bind('run-blender','blender', () => ({aoi:selectedArea()}));
 
 api('status').then(config => {
     for (const [value, label] of Object.entries(config.products)) {

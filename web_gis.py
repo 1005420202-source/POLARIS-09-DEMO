@@ -21,7 +21,7 @@ PRODUCTS = {
 }
 
 
-def paint_sample(pixels, vis, path, discrete):
+def paint_sample(pixels, vis, path, discrete, upscale=True):
     import numpy as np
     from PIL import Image, ImageColor
 
@@ -39,7 +39,7 @@ def paint_sample(pixels, vis, path, discrete):
         rgb = np.stack([np.interp(colors, steps, palette[:, channel]) for channel in range(3)], axis=-1)
     rgba = np.dstack((rgb, valid * 255)).astype('uint8')
     image = Image.fromarray(rgba)
-    factor = max(1, 560 // max(image.size))
+    factor = max(1, 560 // max(image.size)) if upscale else 1
     image.resize((image.width*factor,image.height*factor),Image.Resampling.NEAREST).save(path)
 
 
@@ -64,6 +64,25 @@ def make_preview(ee, image, region, geometry, vis, path, scale, discrete):
                                     defaultValue=-9999).get(property_name).getInfo()
     paint_sample(pixels, vis, path, discrete)
     return f' · muestreo de vista previa ~{preview_scale} m'
+
+
+def terrain_sample(ee, geometry):
+    from pyproj import Geod
+    from shapely.geometry import shape
+
+    west, south, east, north = shape(geometry).bounds
+    mid_lat = (south+north)/2
+    mid_lon = (west+east)/2
+    geod = Geod(ellps='WGS84')
+    width = geod.inv(west,mid_lat,east,mid_lat)[2]
+    height = geod.inv(mid_lon,south,mid_lon,north)[2]
+    scale = max(30, round(max(east-west,north-south)*111320/110))
+    region = ee.Geometry(geometry)
+    image = (ee.Image('NASA/NASADEM_HGT/001').select('elevation').toFloat()
+             .clip(region).reproject(crs='EPSG:4326',scale=scale))
+    values = image.sampleRectangle(region=region.bounds(1),properties=[],
+                                   defaultValue=-9999).get('elevation').getInfo()
+    return values, width, height, scale
 
 
 def analyze(ee, geometry, start, end, key, folder):

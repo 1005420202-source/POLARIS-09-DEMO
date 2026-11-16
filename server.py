@@ -206,7 +206,7 @@ def new_run():
 
 @app.get('/api/file/<run>/<path:name>')
 def download(run, name):
-    if not re.fullmatch(r'[a-f0-9]{24}', run) or not re.fullmatch(r'[\w.-]+\.(png|pdf|gif|tif|csv|blend)', name):
+    if not re.fullmatch(r'[a-f0-9]{24}', run) or not re.fullmatch(r'[\w.-]+\.(png|jpg|pdf|gif|tif|csv|blend)', name):
         abort(404)
     return send_from_directory(workspace() / run, name, as_attachment=name.endswith(('.pdf','.tif','.csv','.blend')))
 
@@ -400,20 +400,18 @@ def report():
 
 @app.post('/api/blender')
 def render():
-    from polaris31_blender import render_map
+    from polaris31_blender import render_terrain
+    from web_gis import terrain_sample
+
+    geometry = geo(payload().get('aoi'))
+
     def execute():
-        state = read_results()
-        maps = state.get('artifacts',{}).get('maps',[])
-        simulation = state.get('simulacion_aoi',{}).get('archivos',{})
-        source = maps[-1]['path'] if maps else simulation.get('mapa_superficial')
-        if not source:
-            raise ValueError('Genera primero un mapa GIS o de simulación.')
+        pixels, width, height, scale = terrain_sample(earth_engine(),geometry)
         folder = new_run()
-        piece = render_map(source,folder)
-        if not piece.get('imagen'):
-            app.logger.warning('Blender: %s %s',piece.get('estado'),piece.get('detalle',''))
-            abort(502,'Blender no produjo un render. Comprueba que el servidor pueda ejecutarlo.')
-        legend = {key: maps[-1][key] for key in ('key','legend','scale_note') if key in maps[-1]} if maps else {}
-        return jsonify(maps=[{'title':'Lámina cartográfica en Blender',
-                       'path':asset(folder,Path(piece['imagen']).name),**legend}])
+        jpg, pdf = render_terrain(pixels,width,height,scale,folder)
+        return jsonify(
+            maps=[{'title':'Relieve 3D NASADEM en Blender','path':asset(folder,jpg.name)}],
+            downloads=[{'label':'Descargar JPG','path':asset(folder,jpg.name)},
+                       {'label':'Descargar PDF del relieve 3D','path':asset(folder,pdf.name)}],
+        )
     return run_job(execute)
